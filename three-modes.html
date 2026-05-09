@@ -1,0 +1,1327 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>三组互动 · 花卉 · 蒲公英 · 树与鸟</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      margin: 0;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: #f5f0e0;
+      color: #333;
+    }
+    #mainCanvas {
+      display: block;
+      position: fixed;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 0;
+    }
+    .camera-pip {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      width: 200px;
+      height: 150px;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.25);
+      z-index: 10;
+      transform: scaleX(-1);
+      border: 1px solid rgba(255,255,255,0.15);
+    }
+    .camera-pip video, .camera-pip canvas {
+      position: absolute;
+      width: 100%; height: 100%;
+      object-fit: cover;
+      left: 0; top: 0;
+    }
+    .camera-pip canvas { pointer-events: none; }
+    .pip-label {
+      position: absolute;
+      bottom: 6px;
+      left: 8px;
+      font-size: 10px;
+      color: rgba(255,255,255,0.9);
+      text-shadow: 0 1px 2px #000;
+      z-index: 2;
+    }
+    .mode-bar {
+      position: fixed;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10;
+      display: flex;
+      gap: 8px;
+      background: rgba(255,255,255,0.92);
+      padding: 8px 12px;
+      border-radius: 999px;
+      box-shadow: 0 2px 16px rgba(0,0,0,0.08);
+    }
+    .mode-bar button {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 999px;
+      font-size: 13px;
+      cursor: pointer;
+      background: transparent;
+      color: #666;
+      transition: background 0.2s, color 0.2s;
+    }
+    .mode-bar button:hover { background: rgba(0,0,0,0.06); color: #333; }
+    .mode-bar button.active { background: #333; color: #fff; }
+    .top-actions {
+      position: fixed;
+      top: 20px;
+      left: 20px;
+      z-index: 10;
+      display: flex;
+      gap: 8px;
+    }
+    .top-actions .btn {
+      padding: 8px 16px;
+      border: none;
+      border-radius: 8px;
+      font-size: 12px;
+      cursor: pointer;
+      background: rgba(255,255,255,0.9);
+      color: #333;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+    .top-actions .btn:hover { background: #fff; }
+    .top-actions .btn.danger { background: #c45c2a; color: #fff; }
+    .hint {
+      position: fixed;
+      bottom: 180px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 13px;
+      color: rgba(0,0,0,0.65);
+      z-index: 5;
+      text-align: center;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="mainCanvas"></canvas>
+  <div class="top-actions">
+    <button id="startBtn" class="btn">开启摄像头</button>
+    <button id="stopBtn" class="btn danger" disabled>停止</button>
+    <button id="debugToggle" class="btn">调试面板</button>
+  </div>
+  <div id="debugPanel" style="display:none; position:fixed; top:60px; left:20px; width:260px; padding:10px 12px; font-size:11px; line-height:1.5; background:rgba(0,0,0,0.72); color:#f5f5f5; border-radius:10px; box-shadow:0 4px 18px rgba(0,0,0,0.35); z-index:11;">
+    <div style="font-weight:600; margin-bottom:4px;">调试面板 Debug Panel</div>
+    <div id="dbgFps">FPS: --</div>
+    <div id="dbgMode">Mode: --</div>
+    <div id="dbgGesture">Gesture: --</div>
+    <div id="dbgExtra" style="margin-top:4px; opacity:0.85;">Camera / model status: --</div>
+  </div>
+  <div class="mode-bar">
+    <button data-mode="flowers" class="active">花卉</button>
+    <button data-mode="dandelions">蒲公英</button>
+    <button data-mode="tree">树与鸟</button>
+  </div>
+  <div class="hint" id="hint">用鼠标移动/按住可互动 · 开启摄像头后可用脸部与表情</div>
+
+  <div class="camera-pip" id="cameraPip" style="display: none;">
+    <video id="video" playsinline muted></video>
+    <canvas id="pipOverlay"></canvas>
+    <span class="pip-label">摄像头</span>
+  </div>
+
+  <script>
+(function() {
+  'use strict';
+
+  var canvas = document.getElementById('mainCanvas');
+  var VIDEO = document.getElementById('video');
+  var PIP_OVERLAY = document.getElementById('pipOverlay');
+  var CAMERA_PIP = document.getElementById('cameraPip');
+  var HINT = document.getElementById('hint');
+  var DBG_PANEL = document.getElementById('debugPanel');
+  var DBG_FPS = document.getElementById('dbgFps');
+  var DBG_MODE = document.getElementById('dbgMode');
+  var DBG_GESTURE = document.getElementById('dbgGesture');
+  var DBG_EXTRA = document.getElementById('dbgExtra');
+
+  var stream = null;
+  var faceLandmarker = null;
+  var landmarkerType = null; // 'mp' | 'tfjs'
+  var tfDetector = null;
+  var faceData = null;
+  var currentMode = 'flowers';
+  var mouseX = 0.5;
+  var mouseY = 0.5;
+  var mouseDown = false;
+  var animTime = 0;
+  var lastFrameTime = performance.now();
+  var fps = 0;
+  var fpsSmooth = 0;
+  var seeds = [];
+  var treeDotData = [];
+  var birdPos = null;
+  var birds = null;
+  var audioContext = null;
+  var analyser = null;
+  var lastBlowTime = 0;
+  var lastEAR = 1;
+  var blinkArmed = true;
+  var lastBlinkAt = 0;
+  var smoothedYaw = 0;
+  var lastYaw = 0;
+  var shakeEnergy = 0;
+  var flowerBloom = 0;
+  var flowerScale = 1.65;
+  var flowerOpen = 0;
+  var flowerOpenTarget = 0;
+  var flowerOpenPulse = 0;
+  var stipplePattern = null;
+  var bluePaperPattern = null;
+  var dandelionArt = null;
+  var dandelionScale = 2.25;
+  var dandelionField = null;
+  var dandelionFieldSeed = 1337;
+  var dandelionWind = 0;
+
+  var FACE_OVAL = [10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,378,400,377,152,148,176,149,150,136,172,58,132,93,234,127,162,21,54,103,67,109];
+  // FaceMesh indices (MediaPipe): used for blink/yaw.
+  var LEFT_EYE = { outer: 33, inner: 133, up1: 160, up2: 158, down1: 144, down2: 153 };
+  var RIGHT_EYE = { outer: 362, inner: 263, up1: 385, up2: 387, down1: 380, down2: 373 };
+  var NOSE_TIP = 1;
+  var LEFT_CHEEK = 234;
+  var RIGHT_CHEEK = 454;
+
+  // Layout & style aligned to the provided reference (carnation-like forms).
+  var flowerPositions = [
+    { kind: 'side', rx: 0.74, ry: 0.24, s: 1.08, rot: -0.08 }, // top-right side flower
+    { kind: 'top',  rx: 0.28, ry: 0.50, s: 1.10, rot:  0.10 }, // left disc flower
+    { kind: 'top',  rx: 0.72, ry: 0.70, s: 1.12, rot: -0.12 }, // right disc flower
+    { kind: 'side', rx: 0.18, ry: 0.86, s: 1.05, rot:  0.06 }  // bottom-left side flower
+  ];
+  var flowerStemH = [0.44, 0.50, 0.48, 0.30];
+  var dandelionX = [0.25, 0.5, 0.75];
+  var i, n;
+
+  function resize() {
+    var w = window.innerWidth;
+    var h = window.innerHeight;
+    canvas.width = w;
+    canvas.height = h;
+  }
+
+  function getMouseExpression() {
+    var wobble = 0.02 * Math.sin(animTime * 2);
+    return {
+      centerX: mouseX + wobble,
+      centerY: mouseY + wobble * 0.5,
+      smile: mouseDown ? 0.8 : 0.35,
+      mouthOpen: mouseDown ? 0.5 : 0.1
+    };
+  }
+
+  function getCurrentExpression() {
+    return (faceData && faceData.expression) ? faceData.expression : getMouseExpression();
+  }
+
+  function getGestureLabel(expr) {
+    if (!expr) return 'None';
+    var labels = [];
+    if (lastEAR < 0.22) labels.push('Blink');
+    if (shakeEnergy > 0.35) labels.push('Head shake');
+    // approximate "approach" by centerY（树模式主要用到）
+    if (currentMode === 'tree' && expr.centerY < 0.4) labels.push('Face close');
+    if (!labels.length) return 'Idle';
+    return labels.join(' + ');
+  }
+
+  function dist2(a, b) {
+    var dx = (a.x - b.x);
+    var dy = (a.y - b.y);
+    return Math.hypot(dx, dy);
+  }
+
+  function computeEAR(lm, eye) {
+    var p1 = lm[eye.outer], p4 = lm[eye.inner];
+    var p2 = lm[eye.up1], p6 = lm[eye.down1];
+    var p3 = lm[eye.up2], p5 = lm[eye.down2];
+    if (!p1 || !p2 || !p3 || !p4 || !p5 || !p6) return 1;
+    var vertical = dist2(p2, p6) + dist2(p3, p5);
+    var horizontal = 2 * dist2(p1, p4);
+    if (horizontal <= 1e-6) return 1;
+    return vertical / horizontal;
+  }
+
+  function computeYaw(lm) {
+    var nose = lm[NOSE_TIP];
+    var lc = lm[LEFT_CHEEK];
+    var rc = lm[RIGHT_CHEEK];
+    if (!nose || !lc || !rc) return 0;
+    var midX = (lc.x + rc.x) * 0.5;
+    var faceW = Math.max(1e-6, Math.abs(rc.x - lc.x));
+    // Negative -> face turned right (camera mirrored later in pip), positive -> left.
+    return (nose.x - midX) / faceW;
+  }
+
+  function registerBlink() {
+    lastBlinkAt = Date.now();
+    flowerBloom = Math.min(1, flowerBloom + 0.85);
+    flowerOpenTarget = 1;
+    flowerOpenPulse = Math.min(1, flowerOpenPulse + 0.75);
+  }
+
+  function ensureStipplePattern() {
+    if (stipplePattern) return;
+    var sc = document.createElement('canvas');
+    sc.width = 96; sc.height = 96;
+    var sctx = sc.getContext('2d');
+    sctx.clearRect(0, 0, sc.width, sc.height);
+    // dotted/speckle texture similar to the reference image
+    for (var k = 0; k < 2400; k++) {
+      var x = Math.random() * sc.width;
+      var y = Math.random() * sc.height;
+      var a = 0.06 + Math.random() * 0.12;
+      var r = 0.6 + Math.random() * 1.3;
+      sctx.fillStyle = 'rgba(255,255,255,' + a + ')';
+      sctx.beginPath();
+      sctx.arc(x, y, r, 0, Math.PI * 2);
+      sctx.fill();
+    }
+    stipplePattern = canvas.getContext('2d').createPattern(sc, 'repeat');
+  }
+
+  function ensureBluePaperPattern() {
+    if (bluePaperPattern) return;
+    var sc = document.createElement('canvas');
+    sc.width = 160; sc.height = 160;
+    var sctx = sc.getContext('2d');
+    sctx.clearRect(0, 0, sc.width, sc.height);
+    // watercolor paper grain + tiny specks
+    for (var k = 0; k < 5200; k++) {
+      var x = Math.random() * sc.width;
+      var y = Math.random() * sc.height;
+      var a = 0.015 + Math.random() * 0.05;
+      var r = 0.4 + Math.random() * 1.8;
+      // slightly bluish + some white specks
+      var c = (Math.random() < 0.75) ? 'rgba(30,70,120,' + a + ')' : 'rgba(255,255,255,' + (a * 1.1) + ')';
+      sctx.fillStyle = c;
+      sctx.beginPath();
+      sctx.arc(x, y, r, 0, Math.PI * 2);
+      sctx.fill();
+    }
+    // faint vertical wash strokes
+    for (var i2 = 0; i2 < 10; i2++) {
+      var gx = Math.random() * sc.width;
+      var gw = 10 + Math.random() * 28;
+      var gg = sctx.createLinearGradient(gx, 0, gx + gw, 0);
+      gg.addColorStop(0, 'rgba(120,150,210,0)');
+      gg.addColorStop(0.5, 'rgba(120,150,210,0.08)');
+      gg.addColorStop(1, 'rgba(120,150,210,0)');
+      sctx.fillStyle = gg;
+      sctx.fillRect(gx, 0, gw, sc.height);
+    }
+    bluePaperPattern = canvas.getContext('2d').createPattern(sc, 'repeat');
+  }
+
+  function zigzagCirclePath(ctx, x, y, r, teeth, amp, rot) {
+    ctx.beginPath();
+    for (var t = 0; t <= teeth; t++) {
+      var a = rot + (t / teeth) * Math.PI * 2;
+      var rr = r + amp * (t % 2 === 0 ? 1 : -0.35);
+      var px = x + Math.cos(a) * rr;
+      var py = y + Math.sin(a) * rr;
+      if (t === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+  }
+
+  function drawTopCarnation(ctx, x, y, baseR, open, rot) {
+    var rOuter = baseR * (0.55 + 0.55 * open);
+    var rMid = baseR * (0.38 + 0.35 * open);
+    var rCore = baseR * (0.18 + 0.12 * open);
+
+    // outer serrated petals
+    zigzagCirclePath(ctx, x, y, rOuter, 44, baseR * 0.08, rot);
+    var g1 = ctx.createRadialGradient(x, y, rMid * 0.2, x, y, rOuter * 1.05);
+    g1.addColorStop(0, '#ffb27a');
+    g1.addColorStop(0.55, '#ff6a1f');
+    g1.addColorStop(1, '#ff3d00');
+    ctx.fillStyle = g1;
+    ctx.fill();
+
+    // speckle highlight band
+    ensureStipplePattern();
+    ctx.save();
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = 'rgba(255,245,230,0.95)';
+    ctx.beginPath();
+    ctx.arc(x, y, rOuter * 0.92, 0, Math.PI * 2);
+    ctx.arc(x, y, rMid * 0.72, 0, Math.PI * 2, true);
+    ctx.fill('evenodd');
+    ctx.globalCompositeOperation = 'source-atop';
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = stipplePattern;
+    ctx.fillRect(x - rOuter, y - rOuter, rOuter * 2, rOuter * 2);
+    ctx.restore();
+
+    // inner radial wedges for depth
+    var wedges = 6;
+    for (var wdg = 0; wdg < wedges; wdg++) {
+      var a0 = rot + (wdg / wedges) * Math.PI * 2;
+      var a1 = rot + ((wdg + 1) / wedges) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.arc(x, y, rMid * (0.92 - 0.08 * open), a0, a1);
+      ctx.closePath();
+      ctx.fillStyle = (wdg % 2 === 0) ? 'rgba(255,70,0,0.95)' : 'rgba(255,140,90,0.35)';
+      ctx.fill();
+    }
+
+    ctx.fillStyle = 'rgba(255,210,160,' + (0.45 + 0.25 * open) + ')';
+    ctx.beginPath();
+    ctx.arc(x, y, rCore, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawSideCarnation(ctx, x, y, w, h, open, rot) {
+    var petalH = h * (0.35 + 0.65 * open);
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(rot);
+
+    // petals silhouette (serrated top edge)
+    ctx.beginPath();
+    var teeth = 14;
+    var left = -w * 0.55;
+    var right = w * 0.55;
+    var baseY = -petalH * 0.25;
+    ctx.moveTo(left, baseY);
+    for (var t = 0; t <= teeth; t++) {
+      var px = left + (t / teeth) * (right - left);
+      var scallop = (t % 2 === 0 ? 1 : 0.55);
+      var py = -petalH + (1 - scallop) * (petalH * 0.28);
+      ctx.lineTo(px, py);
+    }
+    ctx.lineTo(right, baseY);
+    ctx.quadraticCurveTo(w * 0.35, petalH * 0.18, 0, petalH * 0.10);
+    ctx.quadraticCurveTo(-w * 0.35, petalH * 0.18, left, baseY);
+    ctx.closePath();
+
+    var gg = ctx.createLinearGradient(0, -petalH, 0, petalH * 0.25);
+    gg.addColorStop(0, '#ff3d00');
+    gg.addColorStop(0.55, '#ff6a1f');
+    gg.addColorStop(1, '#ffd3b2');
+    ctx.fillStyle = gg;
+    ctx.fill();
+
+    // speckle
+    ensureStipplePattern();
+    ctx.save();
+    ctx.globalCompositeOperation = 'source-atop';
+    ctx.globalAlpha = 0.95;
+    ctx.fillStyle = stipplePattern;
+    ctx.fillRect(-w, -petalH, w * 2, petalH * 1.6);
+    ctx.restore();
+
+    // green calyx under head
+    ctx.fillStyle = '#144b1a';
+    ctx.beginPath();
+    ctx.moveTo(-w * 0.18, petalH * 0.08);
+    ctx.quadraticCurveTo(-w * 0.45, petalH * 0.18, -w * 0.28, petalH * 0.40);
+    ctx.quadraticCurveTo(-w * 0.05, petalH * 0.38, 0, petalH * 0.18);
+    ctx.quadraticCurveTo(w * 0.05, petalH * 0.38, w * 0.28, petalH * 0.40);
+    ctx.quadraticCurveTo(w * 0.45, petalH * 0.18, w * 0.18, petalH * 0.08);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  function drawStemAndLeaves(ctx, x, yTop, h, thickness, leafSide) {
+    var yBottom = yTop + h;
+    ctx.strokeStyle = '#144b1a';
+    ctx.lineWidth = thickness;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x, yTop + 6);
+    ctx.lineTo(x, yBottom);
+    ctx.stroke();
+
+    var leafY = yTop + h * 0.55;
+    var dir = leafSide || 1;
+    ctx.fillStyle = '#144b1a';
+    ctx.beginPath();
+    ctx.moveTo(x, leafY);
+    ctx.quadraticCurveTo(x + dir * 28, leafY - 14, x + dir * 42, leafY - 26);
+    ctx.quadraticCurveTo(x + dir * 16, leafY - 14, x, leafY + 6);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(x, leafY + 18);
+    ctx.quadraticCurveTo(x - dir * 26, leafY + 8, x - dir * 40, leafY - 2);
+    ctx.quadraticCurveTo(x - dir * 14, leafY + 10, x, leafY + 24);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function rand01() {
+    // simple LCG for stable layout
+    dandelionFieldSeed = (dandelionFieldSeed * 1664525 + 1013904223) >>> 0;
+    return (dandelionFieldSeed & 0xffffff) / 0x1000000;
+  }
+
+  function ensureDandelionField() {
+    if (dandelionField) return;
+    dandelionField = [];
+    // dense field across ground area
+    var count = 64;
+    for (var k = 0; k < count; k++) {
+      var rx = 0.06 + rand01() * 0.88;
+      var ry = 0.60 + rand01() * 0.30; // 0.60..0.90
+      var type = (rand01() < 0.68) ? 'puff' : 'bud';
+      var scale = 0.7 + rand01() * 0.85;
+      dandelionField.push({
+        rx: rx,
+        ry: ry,
+        type: type,
+        scale: scale,
+        swayPhase: rand01() * Math.PI * 2
+      });
+    }
+  }
+
+  function drawFlowers(ctx, expr) {
+    expr = expr || getMouseExpression();
+    var w = canvas.width;
+    var h = canvas.height;
+    // Background color matches the reference image.
+    ctx.fillStyle = '#f6d9ad';
+    ctx.fillRect(0, 0, w, h);
+
+    // Blink -> petals open quickly & strongly (petals opening, not whole scaling).
+    var now = Date.now();
+    if (flowerOpenTarget > 0 && now - lastBlinkAt > 900) flowerOpenTarget = 0;
+    var ease = stream ? 0.14 : 0.06;
+    flowerOpen += (flowerOpenTarget - flowerOpen) * ease;
+    flowerOpenPulse *= 0.86;
+    flowerBloom *= 0.90;
+
+    // stems first (behind heads)
+    for (i = 0; i < flowerPositions.length; i++) {
+      var fp = flowerPositions[i];
+      var sx = fp.rx * w;
+      var sy = fp.ry * h;
+      var sh = (flowerStemH[i] || 0.4) * h;
+      drawStemAndLeaves(ctx, sx, sy + 18, sh, 10, (i % 2 === 0 ? 1 : -1));
+    }
+
+    // heads on top
+    for (i = 0; i < flowerPositions.length; i++) {
+      var f = flowerPositions[i];
+      var x = f.rx * w;
+      var y = f.ry * h;
+      var open = Math.max(0, Math.min(1, 0.10 + 0.92 * flowerOpen + 0.65 * flowerOpenPulse));
+      open = Math.max(0, Math.min(1, open + 0.06 * (expr.smile || 0.3)));
+
+      if (f.kind === 'top') {
+        ctx.fillStyle = '#144b1a';
+        ctx.beginPath();
+        ctx.ellipse(x, y + 44, 34 * flowerScale * f.s, 22 * flowerScale * f.s, 0, 0, Math.PI * 2);
+        ctx.fill();
+        drawTopCarnation(ctx, x, y, 72 * flowerScale * f.s, open, f.rot);
+      } else {
+        drawSideCarnation(ctx, x, y, 160 * flowerScale * f.s, 125 * flowerScale * f.s, open, f.rot);
+      }
+    }
+
+    // very subtle background speckle
+    ensureStipplePattern();
+    ctx.save();
+    ctx.globalAlpha = 0.10;
+    ctx.fillStyle = stipplePattern;
+    ctx.fillRect(0, 0, w, h);
+    ctx.restore();
+  }
+
+  function drawDandelions(ctx, expr) {
+    expr = expr || getMouseExpression();
+    var w = canvas.width;
+    var h = canvas.height;
+
+    function drawHead(x, y, r, alpha) {
+      alpha = (alpha == null) ? 1 : alpha;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      // stronger fluffy texture: multi-pass filaments + halo layers
+      ctx.lineWidth = 1;
+      var spokes = 96;
+      for (var pass = 0; pass < 2; pass++) {
+        var jitter = pass === 0 ? 0 : 0.012;
+        ctx.strokeStyle = pass === 0 ? 'rgba(255,255,255,0.55)' : 'rgba(255,255,255,0.28)';
+        for (var k = 0; k < spokes; k++) {
+          var a = (k / spokes) * Math.PI * 2 + (Math.random() - 0.5) * jitter;
+          // strictly circular head (reference): keep rr ~ r with tiny noise only
+          var rr = r * (0.98 + (Math.random() - 0.5) * 0.045);
+          var x2 = x + Math.cos(a) * rr;
+          var y2 = y + Math.sin(a) * rr;
+          ctx.beginPath();
+          ctx.moveTo(x, y);
+          ctx.lineTo(x2, y2);
+          ctx.stroke();
+          // star-like tips
+          var tip = 3.2 + Math.random() * 1.6;
+          ctx.beginPath();
+          ctx.moveTo(x2 - tip * Math.cos(a + 0.7), y2 - tip * Math.sin(a + 0.7));
+          ctx.lineTo(x2 + tip * Math.cos(a + 0.7), y2 + tip * Math.sin(a + 0.7));
+          ctx.stroke();
+        }
+      }
+      // halo layers
+      ctx.strokeStyle = 'rgba(255,255,255,0.40)';
+      ctx.globalAlpha = alpha * 0.55;
+      ctx.beginPath();
+      ctx.arc(x, y, r * 1.00, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = alpha * 0.28;
+      ctx.beginPath();
+      ctx.arc(x, y, r * 1.08, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawStem(x0, y0, x1, y1, alpha) {
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+      ctx.lineWidth = 4;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.quadraticCurveTo((x0 + x1) * 0.55, (y0 + y1) * 0.55 + 30, x1, y1);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawPuffSeed(x, y, s, rot, alpha) {
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = 'rgba(255,255,255,0.82)';
+      ctx.lineWidth = 1;
+      // stem
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x - Math.cos(rot) * 18 * s, y - Math.sin(rot) * 18 * s);
+      ctx.stroke();
+      // umbrella
+      var cx = x;
+      var cy = y;
+      var umb = 11.5 * s;
+      var rays = 9;
+      for (var i3 = 0; i3 < rays; i3++) {
+        var a = rot + (i3 / (rays - 1)) * Math.PI * 0.95 - Math.PI * 0.48;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + Math.cos(a) * umb, cy + Math.sin(a) * umb);
+        ctx.stroke();
+      }
+      // tiny center dot
+      ctx.beginPath();
+      ctx.arc(cx, cy, 1.6 * s, 0, Math.PI * 2);
+      ctx.stroke();
+      // slight glow
+      ctx.globalAlpha = alpha * 0.35;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 6.5 * s, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // watercolor blue background
+    ensureBluePaperPattern();
+    var bg = ctx.createLinearGradient(0, 0, w, h);
+    bg.addColorStop(0, '#7fa0d8');
+    bg.addColorStop(0.55, '#89aee2');
+    bg.addColorStop(1, '#9ab9ea');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, w, h);
+    ctx.save();
+    ctx.globalAlpha = 0.55;
+    ctx.fillStyle = bluePaperPattern;
+    ctx.fillRect(0, 0, w, h);
+    ctx.restore();
+    // faint pink washes (as in reference)
+    ctx.save();
+    ctx.globalAlpha = 0.20;
+    ctx.fillStyle = '#d889b6';
+    ctx.beginPath();
+    ctx.ellipse(w * 0.18, h * 0.32, 60, 90, 0.2, 0, Math.PI * 2);
+    ctx.ellipse(w * 0.22, h * 0.52, 40, 70, -0.3, 0, Math.PI * 2);
+    ctx.ellipse(w * 0.42, h * 0.78, 55, 45, 0.4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // wind from head yaw + shake (gentle, poetic drift)
+    dandelionWind += (smoothedYaw * 2.2 - dandelionWind) * 0.10;
+    shakeEnergy *= 0.92;
+    var windX = dandelionWind * (0.40 + 1.05 * shakeEnergy);
+    var windY = (-0.18 - 0.18 * shakeEnergy);
+    // idle sway even without head movement
+    var idle = 0.018 * Math.sin(animTime * 1.05) + 0.012 * Math.sin(animTime * 0.6 + 1.7);
+    var idle2 = 0.015 * Math.cos(animTime * 0.9 + 0.8);
+
+    // clusters: left (reference) + right layered heads (depth).
+    if (!dandelionArt) {
+      dandelionArt = [];
+      // main 3 heads
+      dandelionArt.push({ hx: 0.18, hy: 0.63, r: 0.092, a: 0.92, sx: 0.12, sy: 0.90, sa: 0.55, ph: Math.random() * 10 });
+      dandelionArt.push({ hx: 0.40, hy: 0.45, r: 0.102, a: 0.96, sx: 0.18, sy: 0.90, sa: 0.55, ph: Math.random() * 10 });
+      dandelionArt.push({ hx: 0.52, hy: 0.73, r: 0.088, a: 0.90, sx: 0.24, sy: 0.90, sa: 0.55, ph: Math.random() * 10 });
+      // extra small ones (increase count but not too big)
+      dandelionArt.push({ hx: 0.30, hy: 0.72, r: 0.058, a: 0.55, sx: 0.15, sy: 0.90, sa: 0.40, ph: Math.random() * 10 });
+      dandelionArt.push({ hx: 0.26, hy: 0.58, r: 0.052, a: 0.45, sx: 0.14, sy: 0.90, sa: 0.35, ph: Math.random() * 10 });
+      dandelionArt.push({ hx: 0.46, hy: 0.60, r: 0.054, a: 0.40, sx: 0.22, sy: 0.90, sa: 0.35, ph: Math.random() * 10 });
+
+      // right side layered cluster (bigger in front, smaller behind)
+      dandelionArt.push({ hx: 0.78, hy: 0.62, r: 0.112, a: 0.78, sx: 0.70, sy: 0.92, sa: 0.42, ph: Math.random() * 10, z: 3 });
+      dandelionArt.push({ hx: 0.86, hy: 0.50, r: 0.082, a: 0.52, sx: 0.76, sy: 0.92, sa: 0.34, ph: Math.random() * 10, z: 2 });
+      dandelionArt.push({ hx: 0.72, hy: 0.44, r: 0.072, a: 0.46, sx: 0.68, sy: 0.92, sa: 0.30, ph: Math.random() * 10, z: 1 });
+      dandelionArt.push({ hx: 0.90, hy: 0.70, r: 0.064, a: 0.34, sx: 0.80, sy: 0.92, sa: 0.26, ph: Math.random() * 10, z: 0 });
+    }
+
+    var baseScale = Math.min(w, h);
+    // depth sort for nice layering
+    dandelionArt.sort(function(a, b) {
+      var za = (a.z == null) ? a.r : a.z;
+      var zb = (b.z == null) ? b.r : b.z;
+      return za - zb;
+    });
+
+    // draw stems first
+    for (var di = 0; di < dandelionArt.length; di++) {
+      var dd = dandelionArt[di];
+      var swayX = (idle + 0.010 * Math.sin(animTime * 0.7 + dd.ph)) * (1 + 1.3 * shakeEnergy) + windX * 0.012;
+      var hx = (dd.hx + swayX) * w;
+      var hy = (dd.hy + idle2 * 0.4) * h;
+      var sx = dd.sx * w;
+      var sy = dd.sy * h;
+      drawStem(sx, sy, hx, hy, dd.sa);
+    }
+    // then heads
+    for (var di2 = 0; di2 < dandelionArt.length; di2++) {
+      var dd2 = dandelionArt[di2];
+      var swayX2 = (idle + 0.010 * Math.sin(animTime * 0.7 + dd2.ph)) * (1 + 1.3 * shakeEnergy) + windX * 0.012;
+      var hx2 = (dd2.hx + swayX2) * w;
+      var hy2 = (dd2.hy + idle2 * 0.4) * h;
+      // slightly smaller overall than before
+      var rr2 = dd2.r * baseScale;
+      drawHead(hx2, hy2, rr2, dd2.a);
+    }
+
+    // floating puffs
+    for (var i = seeds.length - 1; i >= 0; i--) {
+      var s = seeds[i];
+      s.vx += windX * 0.015 + (Math.random() - 0.5) * 0.02;
+      s.vy += windY * 0.006 + (Math.random() - 0.5) * 0.012;
+      s.x += s.vx;
+      s.y += s.vy;
+      s.vx *= 0.99;
+      s.vy *= 0.99;
+      s.life -= 0.0085;
+      if (s.life <= 0 || s.x > w + 120 || s.y < -120) { seeds.splice(i, 1); continue; }
+      var a = Math.max(0, Math.min(1, s.life));
+      drawPuffSeed(s.x, s.y, s.s || 1, s.rot, 0.85 * a);
+    }
+
+    // Head shake -> puffs released near your face position (multiple places possible).
+    if (stream && shakeEnergy > 0.12) {
+      var strength = Math.min(1, shakeEnergy);
+      if (Math.random() < 0.75 * strength) {
+        // face position in canvas coords (match tree mapping)
+        var fx = (expr && expr.centerX != null) ? (expr.centerX * w) : (w * 0.45);
+        var fy = (expr && expr.centerY != null) ? ((1 - expr.centerY) * h) : (h * 0.55);
+
+        // pick up to 3 nearest heads to face position
+        var nearest = [];
+        for (var ni = 0; ni < dandelionArt.length; ni++) {
+          var cand = dandelionArt[ni];
+          var hxN = cand.hx * w;
+          var hyN = cand.hy * h;
+          var ddx = hxN - fx;
+          var ddy = hyN - fy;
+          var dist = Math.hypot(ddx, ddy);
+          nearest.push({ d: dist, head: cand });
+        }
+        nearest.sort(function(a, b) { return a.d - b.d; });
+
+        var emitCount = 1 + (strength > 0.45 ? 1 : 0) + (strength > 0.75 ? 1 : 0); // 1..3
+        var burstPer = 2 + ((Math.random() * 6 * strength) | 0);
+        for (var ei = 0; ei < emitCount; ei++) {
+          var src = nearest[ei] ? nearest[ei].head : (dandelionArt[1] || { hx: 0.40, hy: 0.45, r: 0.10 });
+          var cx = (src.hx) * w;
+          var cy = (src.hy) * h;
+          var rrBase = (src.r * baseScale);
+          for (var b = 0; b < burstPer; b++) {
+            var a0 = -0.30 + Math.random() * 0.95; // mostly right/up
+            var rr0 = rrBase * (0.25 + Math.random() * 0.90);
+            seeds.push({
+              x: cx + Math.cos(a0) * rr0,
+              y: cy + Math.sin(a0) * rr0,
+              vx: 1.0 + Math.random() * 2.4 + windX * 0.55,
+              vy: (-1.1 - Math.random() * 2.4) + windY * 0.45,
+              life: 1,
+              kind: 'puff',
+              rot: -Math.PI * 0.35 + Math.random() * 0.7,
+              s: 0.80 + Math.random() * 0.75
+            });
+          }
+        }
+      }
+    }
+  }
+
+  function initTreeData() {
+    if (treeDotData.length > 0) return;
+    for (i = 0; i < 520; i++) {
+      var th = Math.random() * Math.PI * 2;
+      var rr = 0.06 + Math.random() * 0.30;
+      var yy = 0.20 + Math.random() * 0.50;
+      treeDotData.push({
+        rx: 0.5 + Math.cos(th) * rr,
+        ry: yy,
+        origRx: 0.5 + Math.cos(th) * rr,
+        origRy: yy,
+        r: 3.5 + Math.random() * 4.0
+      });
+    }
+  }
+
+  function drawTree(ctx, expr) {
+    expr = expr || getMouseExpression();
+    var w = canvas.width;
+    var h = canvas.height;
+    if (treeDotData.length === 0) initTreeData();
+
+    ctx.fillStyle = '#fafafa';
+    ctx.fillRect(0, 0, w, h);
+
+    var cx = w * 0.5;
+    var baseY = h * 0.78;
+    ctx.fillStyle = '#8b7355';
+    ctx.fillRect(cx - 25, baseY - 120, 50, 140);
+
+    var faceX = expr.centerX * w;
+    var faceY = (1 - expr.centerY) * h;
+    var influence, lift, dx, dy, dist, d, bx, by, origBx, origBy;
+
+    function drawBirdSticker(ctx, x, y, s, kind, facing, flap, hueShift) {
+      // Watercolor-ish, rounded birds inspired by the provided reference.
+      ensureStipplePattern();
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(facing, 1);
+      ctx.rotate((Math.sin(flap) * 0.04));
+      ctx.translate(-x, -y);
+
+      var k = kind || 0;
+      var scale = s;
+      var body, wing, beak, accent, eyeRing;
+
+      // palette sets (approximate the reference sheet)
+      if (k === 0) { body = '#f6c44a'; wing = '#f0b73a'; beak = '#f2a51e'; accent = '#d2412c'; eyeRing = '#ffffff'; } // chick
+      else if (k === 1) { body = '#8fb7ff'; wing = '#2c5aa0'; beak = '#f2a51e'; accent = '#1f2c3a'; eyeRing = '#fff2a8'; } // pigeon-ish
+      else if (k === 2) { body = '#6db8ff'; wing = '#2f7cc7'; beak = '#f2a51e'; accent = '#1f2c3a'; eyeRing = '#ffffff'; } // night heron-ish
+      else if (k === 3) { body = '#ff6aa0'; wing = '#6a3aa8'; beak = '#f2a51e'; accent = '#ffcc55'; eyeRing = '#ffffff'; } // cardinal-ish
+      else if (k === 4) { body = '#6cc46c'; wing = '#b7e2ff'; beak = '#1f2c3a'; accent = '#b777cc'; eyeRing = '#ffffff'; } // hummingbird-ish
+      else { body = '#ffb24a'; wing = '#1f2c3a'; beak = '#ff7a1f'; accent = '#2f9bb0'; eyeRing = '#fff2a8'; } // toucan-ish
+
+      // body
+      ctx.fillStyle = body;
+      ctx.beginPath();
+      ctx.ellipse(x, y, 18 * scale, 14 * scale, -0.12, 0, Math.PI * 2);
+      ctx.fill();
+
+      // watercolor speckle on body
+      ctx.save();
+      ctx.globalCompositeOperation = 'source-atop';
+      ctx.globalAlpha = 0.55;
+      ctx.fillStyle = stipplePattern;
+      ctx.fillRect(x - 30 * scale, y - 24 * scale, 60 * scale, 48 * scale);
+      ctx.restore();
+
+      // wing
+      ctx.fillStyle = wing;
+      var wingLift = Math.sin(flap) * 4 * scale;
+      ctx.beginPath();
+      ctx.ellipse(x - 2 * scale, y + 2 * scale - wingLift, 12 * scale, 10 * scale, 0.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      // beak
+      ctx.fillStyle = beak;
+      ctx.beginPath();
+      if (k === 5) {
+        // toucan big beak
+        ctx.ellipse(x + 22 * scale, y - 1 * scale, 18 * scale, 7 * scale, 0.1, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#ff3d00';
+        ctx.beginPath();
+        ctx.ellipse(x + 28 * scale, y - 1 * scale, 8 * scale, 5 * scale, 0.1, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        ctx.moveTo(x + 18 * scale, y - 1 * scale);
+        ctx.lineTo(x + 30 * scale, y + 3 * scale);
+        ctx.lineTo(x + 18 * scale, y + 6 * scale);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      // legs (simple)
+      ctx.strokeStyle = '#f2a51e';
+      ctx.lineWidth = 3 * scale;
+      ctx.beginPath();
+      ctx.moveTo(x - 6 * scale, y + 14 * scale);
+      ctx.lineTo(x - 6 * scale, y + 22 * scale);
+      ctx.moveTo(x + 6 * scale, y + 14 * scale);
+      ctx.lineTo(x + 6 * scale, y + 22 * scale);
+      ctx.stroke();
+
+      // eye
+      ctx.fillStyle = eyeRing;
+      ctx.beginPath();
+      ctx.arc(x + 8 * scale, y - 6 * scale, 6.5 * scale, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#1f2c3a';
+      ctx.beginPath();
+      ctx.arc(x + 9.5 * scale, y - 6 * scale, 2.3 * scale, 0, Math.PI * 2);
+      ctx.fill();
+
+      // accents (crest / cheek)
+      ctx.fillStyle = accent;
+      if (k === 0) {
+        // chick comb + wattle
+        ctx.beginPath();
+        ctx.ellipse(x + 6 * scale, y - 20 * scale, 6 * scale, 10 * scale, 0.15, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.ellipse(x + 14 * scale, y + 4 * scale, 4.5 * scale, 7 * scale, 0.1, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (k === 2) {
+        // heron-like head tuft
+        ctx.strokeStyle = '#1f2c3a';
+        ctx.lineWidth = 2 * scale;
+        ctx.beginPath();
+        ctx.moveTo(x - 2 * scale, y - 18 * scale);
+        ctx.lineTo(x + 10 * scale, y - 26 * scale);
+        ctx.stroke();
+      } else if (k === 3) {
+        // cardinal dots
+        ctx.fillStyle = 'rgba(255,210,80,0.9)';
+        for (var dd = 0; dd < 6; dd++) {
+          ctx.beginPath();
+          ctx.arc(x - 4 * scale + (dd % 3) * 6 * scale, y + 2 * scale + ((dd / 3) | 0) * 6 * scale, 1.6 * scale, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      ctx.restore();
+    }
+
+    // leaves around single tree (use existing treeDotData dots)
+    for (i = 0; i < treeDotData.length; i++) {
+      d = treeDotData[i];
+      var dx_ = d.rx * w - faceX;
+      var dy_ = d.ry * h - faceY;
+      dist = Math.hypot(dx_, dy_);
+      influence = Math.max(0, 1 - dist / 230);
+      lift = influence * 0.022 * (0.85 + 0.35 * (expr.smile || 0.3));
+      d.ry = d.origRy - lift;
+      d.rx = d.origRx + (dx_ / w) * 0.05 * influence;
+      ctx.fillStyle = influence > 0.22 ? '#7fcf86' : '#3f6f46';
+      ctx.beginPath();
+      ctx.arc(d.rx * w, d.ry * h, d.r + 5 * influence, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // small highlight on trunk base
+    ctx.fillStyle = '#c4a574';
+    ctx.beginPath();
+    ctx.ellipse(cx + 55, baseY - 145, 18, 8, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // birds: colored birds + close face triggers fast upward flight
+    if (!birds) {
+      birds = [];
+      var birdCount = 9;
+      for (var bi = 0; bi < birdCount; bi++) {
+        var rx = (cx + (Math.random() - 0.5) * w * 0.6) / w;
+        var ry = (baseY - 200 - Math.random() * 80) / h;
+        birds.push({
+          rx: rx,
+          ry: ry,
+          orx: rx,
+          ory: ry,
+          vx: 0,
+          vy: 0,
+          flying: false,
+          hue: 200 + Math.random() * 40,
+          kind: (Math.random() * 6) | 0,
+          facing: (Math.random() < 0.5 ? -1 : 1),
+          size: 0.95 + Math.random() * 0.35
+        });
+      }
+    }
+
+    var triggerDist = 120;
+    for (i = 0; i < birds.length; i++) {
+      var bb = birds[i];
+      bx = bb.rx * w;
+      by = bb.ry * h;
+      dx = faceX - bx;
+      dy = faceY - by;
+      dist = Math.hypot(dx, dy);
+
+      if (dist < triggerDist) {
+        bb.flying = true;
+        // burst upward + slight horizontal away from face
+        bb.vy += (-10 - Math.random() * 8);
+        bb.vx += (dx > 0 ? -1 : 1) * (2 + Math.random() * 3);
+      }
+
+      if (bb.flying) {
+        bb.vy *= 0.90;
+        bb.vx *= 0.92;
+        bb.ry += (bb.vy / h) * 0.9;
+        bb.rx += (bb.vx / w) * 0.9;
+        // when out of screen, respawn back on tree
+        if (bb.ry < -0.15 || bb.rx < -0.2 || bb.rx > 1.2) {
+          bb.rx = bb.orx;
+          bb.ry = bb.ory;
+          bb.vx = 0;
+          bb.vy = 0;
+          bb.flying = false;
+        }
+      } else {
+        // gentle idle hover around original
+        bb.rx += (bb.orx - bb.rx) * 0.02 + 0.0006 * Math.sin(animTime * 2 + i);
+        bb.ry += (bb.ory - bb.ry) * 0.02 + 0.0005 * Math.cos(animTime * 2 + i);
+      }
+
+      bx = bb.rx * w;
+      by = bb.ry * h;
+      var kind = bb.kind || 0;
+      var facing = bb.facing || 1;
+      var flap = animTime * (bb.flying ? 14 : 6) + i;
+      var scale = bb.size || 1;
+      drawBirdSticker(ctx, bx, by, scale, kind, facing, flap, bb.hue);
+    }
+    ctx.fillStyle = '#c4a574';
+    ctx.beginPath();
+    ctx.ellipse(cx + 55, baseY - 145, 18, 8, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawPipOverlay() {
+    if (!faceData || !faceData.landmarks) return;
+    var w = PIP_OVERLAY.width;
+    var h = PIP_OVERLAY.height;
+    var ctx = PIP_OVERLAY.getContext('2d');
+    ctx.clearRect(0, 0, w, h);
+    var lm = faceData.landmarks;
+    var toX = function(x) { return (1 - x) * w; };
+    var toY = function(y) { return y * h; };
+    ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (var j = 0; j < FACE_OVAL.length; j++) {
+      var l = lm[FACE_OVAL[j]];
+      if (!l) continue;
+      if (j === 0) ctx.moveTo(toX(l.x), toY(l.y));
+      else ctx.lineTo(toX(l.x), toY(l.y));
+    }
+    ctx.closePath();
+    ctx.stroke();
+  }
+
+  function getExpression(landmarks) {
+    if (!landmarks || landmarks.length < 100) return null;
+    var centerX = 0, centerY = 0;
+    for (var k = 0; k < landmarks.length; k++) {
+      centerX += landmarks[k].x;
+      centerY += landmarks[k].y;
+    }
+    centerX /= landmarks.length;
+    centerY /= landmarks.length;
+    var topLip = landmarks[13], bottomLip = landmarks[14];
+    var mouthH = Math.abs((bottomLip && bottomLip.y) - (topLip && topLip.y) || 0);
+    var earL = computeEAR(landmarks, LEFT_EYE);
+    var earR = computeEAR(landmarks, RIGHT_EYE);
+    var ear = (earL + earR) * 0.5;
+    var yaw = computeYaw(landmarks);
+    return {
+      centerX: centerX,
+      centerY: centerY,
+      smile: 0.3 + Math.min(0.5, mouthH * 5),
+      mouthOpen: Math.min(1, mouthH * 8),
+      ear: ear,
+      yaw: yaw
+    };
+  }
+
+  function checkBlow() {
+    if (!analyser) return false;
+    var data = new Uint8Array(analyser.frequencyBinCount);
+    analyser.getByteFrequencyData(data);
+    var low = 0;
+    for (var i = 0; i < 10; i++) low += data[i];
+    low /= 10;
+    if (low > 180 && Date.now() - lastBlowTime > 400) {
+      lastBlowTime = Date.now();
+      return true;
+    }
+    return false;
+  }
+
+  function animate() {
+    requestAnimationFrame(animate);
+    var now = performance.now();
+    var dt = now - lastFrameTime;
+    lastFrameTime = now;
+    if (dt > 0) {
+      fps = 1000 / dt;
+      fpsSmooth += (fps - fpsSmooth) * 0.15;
+    }
+    animTime += 0.016;
+    resize();
+    var ctx = canvas.getContext('2d');
+    var expr = getCurrentExpression();
+
+    if (currentMode === 'flowers') drawFlowers(ctx, expr);
+    else if (currentMode === 'dandelions') {
+      drawDandelions(ctx, expr);
+      if (checkBlow()) {
+        var w = canvas.width;
+        var h = canvas.height;
+        var sx = dandelionX[0] * w;
+        var sy = h * 0.7 - 15;
+        for (i = 0; i < 6; i++) {
+          seeds.push({
+            x: sx, y: sy,
+            vx: (Math.random() - 0.5) * 3,
+            vy: -2 - Math.random() * 2,
+            life: 1
+          });
+        }
+      }
+    } else drawTree(ctx, expr);
+
+    // update debug panel if visible
+    if (DBG_PANEL && DBG_PANEL.style.display !== 'none') {
+      DBG_FPS.textContent = 'FPS: ' + (fpsSmooth ? fpsSmooth.toFixed(1) : '--');
+      DBG_MODE.textContent = 'Mode: ' + currentMode + (stream ? ' (camera on)' : ' (camera off)');
+      DBG_GESTURE.textContent = 'Gesture: ' + getGestureLabel(expr);
+      var modelInfo = landmarkerType ? (landmarkerType === 'mp' ? 'MediaPipe Tasks' : 'TFJS FaceMesh') : 'not initialized';
+      DBG_EXTRA.textContent = 'Camera / model status: ' + (stream ? 'stream ok, ' : 'no stream, ') + modelInfo;
+    }
+  }
+
+  function updateHint() {
+    var needsCamera = !stream ? '（请先开启摄像头） / (Turn on the camera first)' : '';
+    if (currentMode === 'flowers') {
+      HINT.textContent = '眨眼：花卉随着眨眼而绽放。 / Blink: flowers bloom with each blink. ' + needsCamera;
+    } else if (currentMode === 'dandelions') {
+      HINT.textContent = '摇头：蒲公英随着晃动而飘散。 / Shake your head: dandelion puffs drift away. ' + needsCamera;
+    } else {
+      HINT.textContent = '脸靠近：鸟儿飞走啦。 / Move closer: the birds fly away. ' + needsCamera;
+    }
+  }
+
+  async function tick() {
+    if (!stream || !faceLandmarker) {
+      requestAnimationFrame(tick);
+      return;
+    }
+    if (VIDEO.readyState < 2 || !VIDEO.videoWidth) {
+      requestAnimationFrame(tick);
+      return;
+    }
+    var nowMs = performance.now();
+    try {
+      var results = null;
+      if (landmarkerType === 'mp') {
+        results = faceLandmarker.detectForVideo(VIDEO, nowMs);
+      } else if (landmarkerType === 'tfjs') {
+        if (!tfDetector) throw new Error('TFJS detector not ready');
+        // tfjs returns pixel coords; normalize to [0,1] like MediaPipe.
+        var faces = await tfDetector.estimateFaces(VIDEO, { flipHorizontal: false });
+        if (faces && faces[0] && faces[0].keypoints) {
+          var kps = faces[0].keypoints;
+          var lm = new Array(468);
+          for (var kk = 0; kk < kps.length; kk++) {
+            // keypoints length is typically 468
+            lm[kk] = { x: kps[kk].x / VIDEO.videoWidth, y: kps[kk].y / VIDEO.videoHeight };
+          }
+          results = { faceLandmarks: [lm] };
+        } else {
+          results = { faceLandmarks: [] };
+        }
+      }
+
+      if (results && results.faceLandmarks && results.faceLandmarks[0]) {
+        var lm2 = results.faceLandmarks[0];
+        var expr2 = getExpression(lm2);
+        faceData = { landmarks: lm2, expression: expr2 };
+        if (expr2) {
+          // Blink detection (EAR threshold + re-arm).
+          var ear = expr2.ear || 1;
+          // More sensitive + faster re-trigger for frequent blinks.
+          var BLINK_DOWN = 0.205;
+          var BLINK_UP = 0.235;
+          var now = Date.now();
+          if (blinkArmed && ear < BLINK_DOWN && now - lastBlinkAt > 120) {
+            blinkArmed = false;
+          }
+          if (!blinkArmed && ear > BLINK_UP) {
+            blinkArmed = true;
+            registerBlink();
+          }
+          lastEAR = ear;
+
+          // Head yaw smoothing + shake energy (based on yaw velocity).
+          var yaw = expr2.yaw || 0;
+          smoothedYaw += (yaw - smoothedYaw) * 0.35;
+          var dyaw = Math.abs(smoothedYaw - lastYaw);
+          lastYaw = smoothedYaw;
+          var kick = Math.max(0, (dyaw - 0.012) * 18);
+          shakeEnergy = Math.min(1, shakeEnergy + kick);
+        }
+      } else faceData = null;
+    } catch (e) { faceData = null; }
+    if (PIP_OVERLAY.width !== 200) {
+      PIP_OVERLAY.width = 200;
+      PIP_OVERLAY.height = 150;
+    }
+    drawPipOverlay();
+    requestAnimationFrame(tick);
+  }
+
+  async function start() {
+    HINT.textContent = '加载模型中… / Loading model…';
+    // 1) Try MediaPipe Tasks (fast), 2) fallback to TFJS model (more compatible in some networks).
+    try {
+      var mp = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.32/vision_bundle.mjs');
+      var vision = await mp.FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.32/wasm');
+      faceLandmarker = await mp.FaceLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task' },
+        outputFaceBlendshapes: false,
+        numFaces: 1,
+        runningMode: 'VIDEO'
+      });
+      landmarkerType = 'mp';
+    } catch (e1) {
+      try {
+        // TFJS fallback (model assets hosted on npm CDNs)
+        await import('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js');
+        var fld = await import('https://cdn.jsdelivr.net/npm/@tensorflow-models/face-landmarks-detection@1.0.6/dist/face-landmarks-detection.min.js');
+        tfDetector = await fld.createDetector(fld.SupportedModels.MediaPipeFaceMesh, {
+          runtime: 'tfjs',
+          refineLandmarks: true,
+          maxFaces: 1
+        });
+        faceLandmarker = { detectForVideo: function() { return null; } };
+        landmarkerType = 'tfjs';
+      } catch (e2) {
+        HINT.textContent = '加载失败: ' + ((e1 && e1.message) ? e1.message : '') + ' / ' + ((e2 && e2.message) ? e2.message : '');
+        return;
+      }
+    }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: 'user' }, audio: true });
+    } catch (e) {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: 'user' } });
+    }
+    VIDEO.srcObject = stream;
+    VIDEO.muted = true;
+    VIDEO.playsInline = true;
+    await new Promise(function(resolve, reject) {
+      VIDEO.onloadedmetadata = function() { VIDEO.play().then(resolve).catch(reject); };
+      VIDEO.onerror = function() { reject(new Error('Video error')); };
+    });
+    if (stream.getAudioTracks().length) {
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      analyser = audioContext.createAnalyser();
+      analyser.fftSize = 256;
+      audioContext.createMediaStreamSource(stream).connect(analyser);
+    }
+    CAMERA_PIP.style.display = 'block';
+    updateHint();
+    document.getElementById('startBtn').disabled = true;
+    document.getElementById('stopBtn').disabled = false;
+    tick();
+  }
+
+  function stop() {
+    if (stream) { stream.getTracks().forEach(function(t) { t.stop(); }); stream = null; }
+    if (audioContext) { audioContext.close(); audioContext = null; }
+    VIDEO.srcObject = null;
+    CAMERA_PIP.style.display = 'none';
+    faceData = null;
+    faceLandmarker = null;
+    landmarkerType = null;
+    tfDetector = null;
+    seeds = [];
+    shakeEnergy = 0;
+    smoothedYaw = 0;
+    lastYaw = 0;
+    flowerBloom = 0;
+    dandelionWind = 0;
+    birds = null;
+    updateHint();
+    document.getElementById('startBtn').disabled = false;
+    document.getElementById('stopBtn').disabled = true;
+  }
+
+  document.querySelectorAll('.mode-bar button').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      document.querySelector('.mode-bar button.active').classList.remove('active');
+      btn.classList.add('active');
+      currentMode = btn.dataset.mode;
+      if (currentMode === 'tree') treeDotData = [];
+      updateHint();
+    });
+  });
+  document.getElementById('startBtn').addEventListener('click', start);
+  document.getElementById('stopBtn').addEventListener('click', stop);
+  document.getElementById('debugToggle').addEventListener('click', function() {
+    if (!DBG_PANEL) return;
+    var show = DBG_PANEL.style.display === 'none';
+    DBG_PANEL.style.display = show ? 'block' : 'none';
+  });
+
+  function onMove(e) {
+    var t = e.touches ? e.touches[0] : e;
+    if (t) { mouseX = t.clientX / window.innerWidth; mouseY = t.clientY / window.innerHeight; }
+  }
+  function onDown(e) { mouseDown = true; if (e.touches) onMove(e); }
+  function onUp() { mouseDown = false; }
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mousedown', onDown);
+  window.addEventListener('mouseup', onUp);
+  window.addEventListener('touchmove', onMove, { passive: true });
+  window.addEventListener('touchstart', onDown, { passive: true });
+  window.addEventListener('touchend', onUp);
+
+  resize();
+  animate();
+})();
+  </script>
+</body>
+</html>
